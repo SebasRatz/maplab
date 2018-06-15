@@ -83,6 +83,7 @@ bool VIMapRelaxation::relax(
   return relax(solver_options, mission_id_list, map);
 }
 
+
 bool VIMapRelaxation::relax(
     const ceres::Solver::Options& solver_options,
     const vi_map::MissionIdList& mission_id_list, vi_map::VIMap* map) {
@@ -100,6 +101,12 @@ bool VIMapRelaxation::relax(
   }
   LOG(INFO) << num_lc_edges << " loopclosure edges found.";
 
+  return solveRelaxation(solver_options, mission_ids, map);
+}
+
+bool VIMapRelaxation::solveRelaxation(
+    const ceres::Solver::Options &solver_options,
+    vi_map::MissionIdSet mission_ids, vi_map::VIMap *map) {
   map_optimization::ViProblemOptions options =
       map_optimization::ViProblemOptions::initFromGFlags();
 

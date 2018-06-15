@@ -28,6 +28,10 @@ class VIMapRelaxation {
       const ceres::Solver::Options& solver_options,
       const vi_map::MissionIdList& mission_id_list, vi_map::VIMap* map);
 
+  bool solveRelaxation(
+      const ceres::Solver::Options &solver_options,
+      vi_map::MissionIdSet mission_ids, vi_map::VIMap *map);
+
  private:
   void detectLoopclosures(vi_map::MissionIdSet mission_ids, vi_map::VIMap* map);
 
