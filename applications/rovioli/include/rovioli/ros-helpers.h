@@ -43,8 +43,22 @@ inline vio::ImageMeasurement::Ptr convertRosImageToMaplabImage(
   cv_bridge::CvImageConstPtr cv_ptr;
   try {
     // Convert the image to MONO8 if necessary.
-    cv_ptr = cv_bridge::toCvShare(
-        image_message, sensor_msgs::image_encodings::MONO8);
+    if (image_message->encoding == "8UC1") {
+      sensor_msgs::Image img;
+      img.header = image_message->header;
+      img.height = image_message->height;
+      img.width = image_message->width;
+      img.is_bigendian = image_message->is_bigendian;
+      img.step = image_message->step;
+      img.data = image_message->data;
+      img.encoding = "mono8";
+
+      cv_ptr = cv_bridge::toCvCopy(img, sensor_msgs::image_encodings::MONO8);
+    }
+    else {
+      cv_ptr = cv_bridge::toCvShare(image_message, sensor_msgs::image_encodings::MONO8);
+    }
+
   } catch (const cv_bridge::Exception& e) {  // NOLINT
     LOG(FATAL) << "cv_bridge exception: " << e.what();
   }
