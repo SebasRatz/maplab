@@ -20,7 +20,7 @@ std::string CustomMapOptimizationPlugin::getPluginId() const {
 CustomMapOptimizationPlugin::CustomMapOptimizationPlugin(
     common::Console* console, visualization::ViwlsGraphRvizPlotter* plotter)
     : common::ConsolePluginBaseWithPlotter(console, plotter) {
-addCommand(
+  addCommand(
       {"relax_external"},
 
       [this]() -> int {
@@ -62,80 +62,92 @@ addCommand(
 
 bool CustomMapOptimizationPlugin::addLoopClosureEdgesToMap(
     vi_map::VIMap* map, const LoopClosureEdges& edges) {
-  constexpr long kTolerance = 1000000000000; // max 1 micro sec
   bool added_loop_constraint = false;
   for (const auto& edge : edges) {
     clock_t start = clock();
     pose_graph::VertexId id_from;
     // find vertex camera from
-    const bool success_from = findVertexIdByTimeStamp(
-        *map, edge.from.timestamp_ns, kTolerance, &id_from);
+    const SearchResult success_from = findVertexIdByTimeStamp(
+        *map, edge.from.timestamp_ns, &id_from);
     clock_t stop = clock();
-    LOG(INFO) << "Search took " << ((float)(stop - start)) / CLOCKS_PER_SEC << "s";
+    LOG(INFO) << "Search took " << ((float)(stop - start)) / CLOCKS_PER_SEC
+              << "s";
 
     start = clock();
     pose_graph::VertexId id_to;
-    const bool success_to =
+    const SearchResult success_to =
         // find vertex camera to
-        findVertexIdByTimeStamp(*map, edge.to.timestamp_ns, kTolerance, &id_to);
+        findVertexIdByTimeStamp(*map, edge.to.timestamp_ns, &id_to);
     stop = clock();
-    LOG(INFO) << "Search took " << ((float)(stop - start)) / CLOCKS_PER_SEC << "s";
+    LOG(INFO) << "Search took " << ((float)(stop - start)) / CLOCKS_PER_SEC
+              << "s";
 
-    if (success_from && success_to) {
-      float error_from = getPoseError(id_from, *map, edge.from);
-      float error_to = getPoseError(id_to, *map, edge.to);
+    float error_from = getPoseError(id_from, *map, edge.from);
+    float error_to = getPoseError(id_to, *map, edge.to);
 
-      LOG(INFO) << "error from " << error_from;
-      LOG(INFO) << "error to " << error_to;
-      if (error_to > 0.01 || error_from > 0.01) {
-        LOG(ERROR) << "Timestamps found, but corresponding poses are bad!";
-        return false;
-      }
-      LOG(INFO) << "Search was successful! Id_from " << id_from << "ID_to "
-                << id_to;
-
-      // add loop closure edge to map
-      pose_graph::EdgeId edge_id;
-      common::generateId(&edge_id);
-      CHECK(edge_id.isValid());
-
-      constexpr double kSwitchVariable = 0.5;
-      constexpr double kSwitchVariableVariance = 0.5;
-      Eigen::Matrix<double, 6, 6> covariance;
-      covariance.setIdentity();
-      vi_map::Edge::UniquePtr loop_closure_edge(
-          new vi_map::LoopClosureEdge(
-              edge_id, id_from, id_to, kSwitchVariable, kSwitchVariableVariance,
-              edge.T_from_to, covariance));
-      map->addEdge(std::move(loop_closure_edge));
-      added_loop_constraint = true;
-    } else {
-      LOG(ERROR) << "FAIL: Search failed. Timestamp not found!!!";
+    LOG(INFO) << "error from " << error_from;
+    LOG(INFO) << "error to " << error_to;
+    constexpr float kMaxError = 0.02;
+    if (error_to > kMaxError || error_from > kMaxError) {
+      LOG(ERROR) << "No good enough corresponding poses found!";
+      return false;
     }
+    LOG(INFO) << "Search was successful! Id_from " << id_from << "ID_to "
+              << id_to;
+
+    // adapt constraint if necessary
+    const vi_map::Vertex& vertex_source = map->getVertex(id_from);
+    const vi_map::Vertex& vertex_target = map->getVertex(id_to);
+
+    Transformation T_S2_T2;
+    adaptTransformation(
+        edge.from.pose, edge.to.pose, vertex_source.get_T_M_I(),
+        vertex_target.get_T_M_I(), edge.T_from_to, &T_S2_T2);
+
+    // add loop closure edge to map
+    pose_graph::EdgeId edge_id;
+    common::generateId(&edge_id);
+    CHECK(edge_id.isValid());
+
+    constexpr double kSwitchVariable = 1;
+    constexpr double kSwitchVariableVariance = 1e-22;
+    Eigen::Matrix<double, 6, 6> covariance;
+    constexpr double kvarRot = 0.2;
+    constexpr double kvarPos = 0.5;
+    covariance(0,0) = kvarRot;
+    covariance(1,1) = kvarRot;
+    covariance(2,2) = kvarRot;
+    covariance(3,3) = kvarPos;
+    covariance(4,4) = kvarPos;
+    covariance(5,5) = kvarPos;
+    vi_map::Edge::UniquePtr loop_closure_edge(
+        new vi_map::LoopClosureEdge(
+            edge_id, id_from, id_to, kSwitchVariable, kSwitchVariableVariance,
+            T_S2_T2, covariance));
+    map->addEdge(std::move(loop_closure_edge));
+    added_loop_constraint = true;
   }
   return added_loop_constraint;
 }
 
-bool CustomMapOptimizationPlugin::findVertexIdByTimeStamp(
-    const vi_map::VIMap& map, long timestamp, long tolerance,
+SearchResult CustomMapOptimizationPlugin::findVertexIdByTimeStamp(
+    const vi_map::VIMap& map, long timestamp,
     pose_graph::VertexId* result) {
   pose_graph::VertexIdList ids;
   map.getAllVertexIdsAlongGraphsSortedByTimestamp(&ids);
 
-  bool success =
-      //binarySearch(timestamp, ids, map, 0, ids.size() - 1, result, tolerance);
-      search(timestamp, ids, map, result, tolerance);
+  SearchResult success =
+      search(timestamp, ids, map, result);
   return success;
 }
 
-bool CustomMapOptimizationPlugin::search(long find_timestamp,
-                                         const pose_graph::VertexIdList &vertice_ids,
-                                         const vi_map::VIMap &map,
-                                         pose_graph::VertexId *result,
-                                         long tolerance) {
+SearchResult CustomMapOptimizationPlugin::search(
+    long find_timestamp, const pose_graph::VertexIdList& vertice_ids,
+    const vi_map::VIMap& map, pose_graph::VertexId* result) {
   long min_difference = -1;
   pose_graph::VertexId best_vertex_id;
-  bool found_timestamp = false;
+
+  SearchResult search_state = FAILED;
 
   LOG(INFO) << "searching for " << find_timestamp;
   for (const auto& vertex_id : vertice_ids) {
@@ -149,20 +161,25 @@ bool CustomMapOptimizationPlugin::search(long find_timestamp,
       if (min_difference < 0 || difference < min_difference) {
         min_difference = difference;
         best_vertex_id = vertex_id;
-        if (difference < tolerance) {
-          found_timestamp = true;
+        if (difference == 0) {
+          search_state = FOUND;
+          break;
         }
+        search_state = FOUND_CLOSEST_ONE;
       }
     }
+    if (search_state == FOUND) {
+      break;
+    }
   }
-  if (found_timestamp) {
+  if (search_state == FOUND || search_state == FOUND_CLOSEST_ONE) {
     LOG(INFO) << "Found timestamp. Difference: " << min_difference;
     *result = best_vertex_id;
+  } else {
+    LOG(INFO) << "Did not find timestamp. Minimal difference found: "
+              << min_difference;
   }
-  else {
-    LOG(INFO) << "Did not find timestamp. Minimal difference found: " << min_difference;
-  }
-  return found_timestamp;
+  return search_state;
 }
 
 bool CustomMapOptimizationPlugin::binarySearch(
@@ -173,7 +190,8 @@ bool CustomMapOptimizationPlugin::binarySearch(
 
   size_t middle = begin + (end - begin) / 2;
 
-  const long timestamp_check = map.getVertex(vertice_ids[middle]).getMinTimestampNanoseconds();
+  const long timestamp_check =
+      map.getVertex(vertice_ids[middle]).getMinTimestampNanoseconds();
   long distance = timestamp_check - find_timestamp;
   LOG(INFO) << "check" << timestamp_check;
 
@@ -196,22 +214,21 @@ bool CustomMapOptimizationPlugin::binarySearch(
 }
 
 void CustomMapOptimizationPlugin::relaxMap(vi_map::VIMap* map) {
-
   map_optimization::VIMapRelaxation relaxation(plotter_, kSignalHandlerEnabled);
   vi_map::MissionIdList mission_id_list;
   map->getAllMissionIds(&mission_id_list);
 
-  vi_map::MissionIdSet mission_ids(mission_id_list.begin(), mission_id_list.end());
+  vi_map::MissionIdSet mission_ids(
+      mission_id_list.begin(), mission_id_list.end());
   ceres::Solver::Options solver_options =
 
       map_optimization::initSolverOptionsFromFlags();
   relaxation.solveRelaxation(solver_options, mission_ids, map);
 }
 
-float
-CustomMapOptimizationPlugin::getPoseError(const pose_graph::VertexId &vertex_id,
-                                          const vi_map::VIMap &map,
-                                          const Camera& camera) {
+float CustomMapOptimizationPlugin::getPoseError(
+    const pose_graph::VertexId& vertex_id, const vi_map::VIMap& map,
+    const Camera& camera) {
   const vi_map::Vertex& vertex = map.getVertex(vertex_id);
   const Eigen::Vector3d position = vertex.get_p_M_I();
 
@@ -221,6 +238,15 @@ CustomMapOptimizationPlugin::getPoseError(const pose_graph::VertexId &vertex_id,
   return (position - camera.pose.getPosition()).norm();
 }
 
+void CustomMapOptimizationPlugin::adaptTransformation(
+    const Transformation& T_M_S, const Transformation& T_M_T,
+    const Transformation& T_M_S2, const Transformation& T_M_T2,
+    const Transformation& T_S_T, Transformation* T_S2_T2) {
+  const Transformation T_S2_S = T_M_S2.inverse() * T_M_S;
+  const Transformation T_T_T2 = T_M_T.inverse() * T_M_T2;
+
+  *T_S2_T2 = T_S2_S * T_S_T * T_T_T2;
+}
 
 // Finally, call the MAPLAB_CREATE_CONSOLE_PLUGIN macro to create your console
 // plugin.
